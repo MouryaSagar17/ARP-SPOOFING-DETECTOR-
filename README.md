@@ -162,4 +162,8 @@ Do not use it on networks you do not own or have permission to monitor.
 
 ## 👤 Author
 Mourya Sagar
+<<<<<<< HEAD
 Cybersecurity & Network Security Enthusiast
+=======
+Cybersecurity & Network Security Enthusiast
+>>>>>>> 60310f8c92619fa15e2963cb76129cf4396c5bd7
