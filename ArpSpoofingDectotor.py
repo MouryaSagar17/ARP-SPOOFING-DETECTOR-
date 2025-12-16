@@ -77,16 +77,6 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL") or os.environ.get("SMTP_USER") or 
 SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD") or os.environ.get("SMTP_PASS")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL") or os.environ.get("ADMIN") or os.environ.get("FROM_EMAIL")
 
-# quick debug (masked) to confirm the process sees the variables when you run the script
-def _debug_show_smtp_env():
-    try:
-        masked_pwd = None if not SENDER_PASSWORD else SENDER_PASSWORD[:2] + ("*" * max(3, len(SENDER_PASSWORD)-2))
-        print(f"SMTP_SERVER={SMTP_SERVER!r}, SMTP_PORT={SMTP_PORT!r}, SENDER_EMAIL={SENDER_EMAIL!r}, SENDER_PASSWORD={masked_pwd!r}, ADMIN_EMAIL={ADMIN_EMAIL!r}")
-    except Exception:
-        print("SMTP env debug: error")
-
-_debug_show_smtp_env()
-
 # safe log function (GUI log_box may not exist at import time)
 def log_message(msg):
     # print to console for debugging/CLI visibility
@@ -113,12 +103,56 @@ def log_message(msg):
         pass
 
 def save_log(row):
+    """
+    Append CSV row and write a styled 'hacker theme' plain-text log matching the screenshot.
+    Expected row format: [Date, Time, IP, Expected MAC, Spoofed MAC, Status]
+    """
+    # CSV write (preserve existing behavior)
     file_exists = os.path.exists(LOG_FILE)
-    with open(LOG_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["Date", "Time", "IP", "Expected MAC", "Spoofed MAC", "Status"])
-        writer.writerow(row)
+    try:
+        with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Date", "Time", "IP", "Expected MAC", "Spoofed MAC", "Status"])
+            writer.writerow(row)
+    except Exception as e:
+        log_message(f"[LOG ERROR] Failed to write CSV log: {e}")
+
+    # Styled hacker-theme plain-text log
+    SPOOF_LOG_FILE = "spoofing_logs.txt"
+    try:
+        # defensive extraction
+        date = str(row[0]) if len(row) > 0 else ""
+        t = str(row[1]) if len(row) > 1 else ""
+        ip = str(row[2]) if len(row) > 2 else "unknown"
+        expected = str(row[3]) if len(row) > 3 else "unknown"
+        spoofed = str(row[4]) if len(row) > 4 else "unknown"
+        status = str(row[5]) if len(row) > 5 else "ALERT"
+
+        timestamp = f"{date} {t}".strip()
+
+        # normalize MAC to dash-separated lower-case (08-00-27-..)
+        def mac_dash(m):
+            m = (m or "").strip().lower()
+            compact = re.sub(r"[^0-9a-f]", "", m)
+            if len(compact) == 12:
+                return "-".join(compact[i:i+2] for i in range(0, 12, 2))
+            return m or "unknown"
+
+        expected_fmt = mac_dash(expected)
+        spoofed_fmt = mac_dash(spoofed)
+
+        # Compose log lines similar to the image
+        header = f"[{timestamp}] ALERT: IP {ip} | Expected: {expected_fmt} | Spoofed: {spoofed_fmt}"
+        detail = f"Victim IP: {ip} | Original: {expected_fmt} | Spoofed: {spoofed_fmt}"
+        sep = "-" * max(60, len(detail) + 4)
+
+        with open(SPOOF_LOG_FILE, "a", encoding="utf-8") as tf:
+            tf.write(f"{header}\n")
+            tf.write(f"{detail}\n")
+            tf.write(f"{sep}\n")
+    except Exception as e:
+        log_message(f"[LOG ERROR] Failed to write styled log: {e}")
 
 # ================= EMAIL ALERT =================
 def send_email_alert(ip, real_mac, fake_mac):
@@ -267,25 +301,33 @@ def stop_monitoring():
     log_message("[INFO] Monitoring Stopped")
 
 def view_logs():
-    """Open a dialog and display CSV logfile in a Treeview. Mark rows red when a MAC maps to exactly 2 IPs."""
+    """
+    Display logs as 4 columns: Timestamp | Alert IP | Original MAC | Spoofed MAC.
+    Sources:
+      - LOG_FILE (preferred): expects rows [Date, Time, IP, Expected MAC, Spoofed MAC, ...]
+      - ARP_DUP_LOG fallback: rows [timestamp, suspicious_mac, ips] where ips are ";" separated.
+    Expands ARP_DUP_LOG to one row per IP and uses baseline_arp to fill Original MAC when possible.
+    """
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
     except Exception:
         script_dir = os.getcwd()
 
-    primary = os.path.join(script_dir, LOG_FILE)
-    alt = os.path.join(script_dir, ARP_DUP_LOG)
+    path_log = os.path.join(script_dir, LOG_FILE)
+    path_dup = os.path.join(script_dir, ARP_DUP_LOG)
 
-    if os.path.exists(primary):
-        log_path = primary
-    elif os.path.exists(alt):
-        log_path = alt
+    if os.path.exists(path_log):
+        source = path_log
+        mode = "log_file"
+    elif os.path.exists(path_dup):
+        source = path_dup
+        mode = "dup_file"
     else:
         messagebox.showinfo("Logs", f"No logs found ({LOG_FILE} or {ARP_DUP_LOG})")
         return
 
     try:
-        with open(log_path, newline="", encoding="utf-8", errors="ignore") as f:
+        with open(source, newline="", encoding="utf-8", errors="ignore") as f:
             reader = csv.reader(f)
             rows = list(reader)
     except Exception as e:
@@ -296,20 +338,38 @@ def view_logs():
         messagebox.showinfo("Logs", "Log file is empty")
         return
 
-    headers = rows[0]
-    has_header = any(re.search(r"[A-Za-z]", h or "") for h in headers)
-    if not has_header:
-        maxcols = max(len(r) for r in rows)
-        headers = [f"Col{i+1}" for i in range(maxcols)]
-        data_rows = rows
+    # prepare unified rows: [(timestamp, ip, original_mac, spoofed_mac), ...]
+    unified = []
+    if mode == "log_file":
+        # try detect header row; if present skip it
+        header = rows[0]
+        start = 1 if any(re.search(r"[A-Za-z]", h or "") for h in header) else 0
+        for r in rows[start:]:
+            # defensive extraction
+            date = r[0] if len(r) > 0 else ""
+            t = r[1] if len(r) > 1 else ""
+            ip = r[2] if len(r) > 2 else ""
+            orig = r[3] if len(r) > 3 else "unknown"
+            spoof = r[4] if len(r) > 4 else ""
+            ts = f"{date} {t}".strip() if date or t else (r[0] if r else "")
+            unified.append((ts, ip, orig or "unknown", spoof or "unknown"))
     else:
-        data_rows = rows[1:]
+        # ARP_DUP_LOG: expect [timestamp, suspicious_mac, ips]
+        header = rows[0]
+        start = 1 if any(re.search(r"[A-Za-z]", h or "") for h in header) else 0
+        for r in rows[start:]:
+            ts = r[0] if len(r) > 0 else ""
+            suspicious_mac = r[1] if len(r) > 1 else ""
+            ips_field = r[2] if len(r) > 2 else ""
+            ips = [p.strip() for p in ips_field.split(";") if p.strip()]
+            for ip in ips:
+                # try baseline_arp lookup for original mac if available
+                orig = baseline_arp.get(ip, "unknown") if isinstance(baseline_arp, dict) else "unknown"
+                unified.append((ts, ip, orig or "unknown", suspicious_mac or "unknown"))
 
-    # build header -> index map (case-insensitive)
-    header_map = {h.strip().lower(): i for i, h in enumerate(headers)}
-
+    # Build UI
     win = tk.Toplevel(root)
-    win.title(f"ARP Logs - {os.path.basename(log_path)}")
+    win.title("ARP Logs - Viewer")
     win.geometry("920x520")
     win.configure(bg="#000000")
 
@@ -322,19 +382,31 @@ def view_logs():
                     background="#000000",
                     foreground="#39ff14",
                     fieldbackground="#000000",
-                    font=("Consolas", 10))
+                    font=("Consolas", 11))
     style.configure("arp.Treeview.Heading",
-                    background="#0b0b0b",
+                    background="#111111",
                     foreground="#ffffff",
                     font=("Segoe UI", 10, "bold"))
 
     container = tk.Frame(win, bg="#000000")
     container.pack(fill="both", expand=True, padx=6, pady=6)
 
-    tree = ttk.Treeview(container, show="headings", style="arp.Treeview")
+    cols = ("timestamp", "alert_ip", "original_mac", "spoofed_mac")
+    tree = ttk.Treeview(container, columns=cols, show="headings", style="arp.Treeview")
     vsb = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
     hsb = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+    # headings
+    tree.heading("timestamp", text="Timestamp")
+    tree.heading("alert_ip", text="Alert IP")
+    tree.heading("original_mac", text="Original MAC")
+    tree.heading("spoofed_mac", text="Spoofed MAC")
+
+    tree.column("timestamp", width=260, anchor="w")
+    tree.column("alert_ip", width=180, anchor="center")
+    tree.column("original_mac", width=220, anchor="center")
+    tree.column("spoofed_mac", width=220, anchor="center")
 
     tree.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
@@ -343,42 +415,20 @@ def view_logs():
     container.grid_rowconfigure(0, weight=1)
     container.grid_columnconfigure(0, weight=1)
 
-    tree["columns"] = headers
-    for h in headers:
-        tree.heading(h, text=h)
-        tree.column(h, width=140, anchor="w")
+    # tag for red mismatches
+    tree.tag_configure("mismatch", foreground="#ff3b30", font=("Consolas", 11, "bold"))
+    tree.tag_configure("normal", foreground="#39ff14")
 
-    # configure a tag to show suspicious rows in red
-    tree.tag_configure("suspicious", foreground="#ff3b30")  # red text
+    def is_mismatch(orig: str, spoof: str) -> bool:
+        if not orig or orig.lower() in ("unknown", "none"):
+            return False
+        return orig.lower().replace("-", ":").replace(".", ":") != spoof.lower().replace("-", ":").replace(".", ":")
 
-    def _is_suspicious_row_by_count(row_values: List[str]) -> bool:
-        """
-        Return True when the row represents a duplicate-MAC incident where the ips column
-        contains exactly 2 IP addresses (semicolon separated).
-        Falls back to keyword detection if ips column not present.
-        """
-        # prefer checking ARP_DUP_LOG format: 'ips' column with semicolon-separated IPs
-        ips_idx = header_map.get("ips")
-        if ips_idx is not None and ips_idx < len(row_values):
-            raw = (row_values[ips_idx] or "").strip()
-            if raw:
-                parts = [p.strip() for p in raw.split(";") if p.strip()]
-                return len(parts) == 2  # mark only when exactly 2 IPs
-        # fallback: keyword-based suspicion (keeps previous behaviour)
-        text = " ".join(str(x or "") for x in row_values).lower()
-        return bool(re.search(r"(spoof|arp spoof|duplicate\s+mac|spoofed|arp spoofing)", text))
+    for ts, ip, orig, spoof in unified:
+        tag = "mismatch" if is_mismatch(orig, spoof) else "normal"
+        tree.insert("", "end", values=(ts, ip, orig, spoof), tags=(tag,))
 
-    for r in data_rows:
-        if len(r) < len(headers):
-            r = r + [""] * (len(headers) - len(r))
-        try:
-            if _is_suspicious_row_by_count(r):
-                tree.insert("", "end", values=r, tags=("suspicious",))
-            else:
-                tree.insert("", "end", values=r)
-        except Exception:
-            tree.insert("", "end", values=r)
-
+    # bottom close
     btn_frame = tk.Frame(win, bg="#000000")
     btn_frame.pack(fill="x", padx=8, pady=(6,8))
     tk.Button(btn_frame, text="Close", command=win.destroy,
@@ -565,18 +615,74 @@ def scan_arp_table() -> Dict[str, str]:
         return {}
 
 
+def _sanitize_arp_map(ip_mac_map: Dict[str, str]) -> Dict[str, str]:
+    """
+    Filter out noisy ARP entries:
+    - ignore broadcast / all-FF and all-zero MACs
+    - ignore multicast MAC prefixes (01:00:5e...) and link-local IPs (169.254.*)
+    - ignore 255.255.255.255 and empty entries
+    Returns cleaned ip->mac map with normalized mac (lowercase, colon).
+    """
+    IGNORE_IP_PREFIXES = ("169.254.",)  # add more if needed
+    clean: Dict[str, str] = {}
+
+    for ip, mac in (ip_mac_map or {}).items():
+        try:
+            if not ip or not mac:
+                continue
+            ip = ip.strip()
+            # ignore broadcast/full broadcast address
+            if ip == "255.255.255.255":
+                continue
+            if any(ip.startswith(p) for p in IGNORE_IP_PREFIXES):
+                continue
+
+            # normalize mac to lowercase colon separated
+            mac_norm = mac.lower().replace("-", ":").replace(".", ":")
+            # remove any accidental whitespace
+            mac_norm = re.sub(r"\s+", "", mac_norm)
+
+            # normalized compact form for content checks (12 hex chars)
+            compact = re.sub(r"[^0-9a-f]", "", mac_norm)
+
+            # ignore obvious noisy MACs
+            if not compact or len(compact) < 12:
+                continue
+            # all-FF or all-00
+            if compact == "ffffffffffff" or compact == "000000000000":
+                continue
+            # multicast prefix 01:00:5e => IPv4 multicast
+            if compact.startswith("01005e"):
+                continue
+
+            # now reformat into standard colon form (xx:xx:...)
+            mac_std = ":".join(compact[i:i+2] for i in range(0, 12, 2))
+            clean[ip] = mac_std
+        except Exception:
+            continue
+
+    return clean
+
+
 def detect_duplicate_mac(ip_mac_map: Dict[str, str]) -> Dict[str, List[str]]:
     """
-    Invert ip->mac map to mac -> [ips] and return only entries where a MAC maps to 2+ IPs.
+    Invert ip->mac map to mac -> [ips] and return entries where a MAC maps
+    to exactly 2 distinct valid unicast IPs (user requirement).
+    Uses _sanitize_arp_map to remove broadcast/multicast/noise.
     """
+    ip_mac_map = _sanitize_arp_map(ip_mac_map)
     mac_map: Dict[str, List[str]] = {}
     for ip, mac in ip_mac_map.items():
         if not mac:
             continue
         mac_map.setdefault(mac, []).append(ip)
 
-    # Filter duplicates (macs with 2 or more IPs)
-    dup = {mac: ips for mac, ips in mac_map.items() if len(ips) >= 2}
+    # keep only macs mapped to exactly 2 distinct ips
+    dup = {}
+    for mac, ips in mac_map.items():
+        unique_ips = sorted(set(ips))
+        if len(unique_ips) == 2:
+            dup[mac] = unique_ips
     return dup
 
 
@@ -880,8 +986,8 @@ project_btn.pack()
 from PIL import Image, ImageTk  # ...existing import already present above
 
 # sizes (same as original panel/log sizes)
-PANEL_W, PANEL_H = 460, 280
-LOG_W, LOG_H = 920, 240
+PANEL_W, PANEL_H = 460, 240
+LOG_W, LOG_H = 920, 240 
 
 # helper to create a semi-transparent overlay image
 def _create_overlay_image(w: int, h: int, rgba=(0, 0, 0, 160)):
