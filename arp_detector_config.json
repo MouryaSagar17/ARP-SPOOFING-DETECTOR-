@@ -1,0 +1,8 @@
+{
+  "receiver_email": "",
+  "smtp_server": "smtp.example.com",
+  "smtp_port": 587,
+  "smtp_username": "alerts@example.com",
+  "smtp_password": "",
+  "use_tls": true
+}
