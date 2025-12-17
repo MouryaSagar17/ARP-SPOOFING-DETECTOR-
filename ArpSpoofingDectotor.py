@@ -502,9 +502,9 @@ def open_project_file():
     <h1>Project Information</h1>
     <p>This project was developed by 
         <b>Mr. Adimulam Mourya</b>, 
-        <b>Ms. Syeda Afeefa Anjum</b>, 
-        <b>Mr. Patan Akram Khan</b>, and 
-        <b>Mr. Savarapu Vivek</b> 
+        <b>Mr. Neeluru YuvaKiran Reddy</b>, 
+        <b>Mr. Kuruva Vinay</b>, and 
+        <b>Mr. Bodeddula Kiran Kumar</b> 
         as part of a <b>Cyber Security Internship</b>.
     </p>
     <table>
@@ -520,9 +520,9 @@ def open_project_file():
     <table>
         <tr><th>Name</th><th>Employee ID</th><th>Email</th></tr>
         <tr><td>Mr. Adimulam Mourya</td><td>ST#IS#8128</td><td>mouryamourya289@gmail.com</td></tr>
-        <tr><td>Ms. Syeda Afeefa Anjum</td><td>ST#IS#8127</td><td>22691a3747@mits.ac.in</td></tr>
-        <tr><td>Mr. Patan Akram Khan</td><td>ST#IS#8142</td><td>22691a3701@mits.ac.in</td></tr>
-        <tr><td>Mr. Savarapu Vivek</td><td>ST#IS#8143</td><td>22691a3757@mits.ac.in</td></tr>
+        <tr><td>Mr. Neeluru YuvaKiran Reddy</td><td>ST#IS#8125</td><td>22691a3761@mits.ac.in</td></tr>
+        <tr><td>Mr. Kuruva Vinay</td><td>ST#IS#8126</td><td>22691a3755@mits.ac.in</td></tr>
+        <tr><td>Mr. Bodeddula Kiran Kumar</td><td>ST#IS#8130</td><td>22691a3716@mits.ac.in</td></tr>
     </table>
 
     <h2>Company Details</h2>
